@@ -19,7 +19,7 @@ CMake verifies the pinned JUCE 8.0.12 archive. An offline build can use an extra
 1. Connect the keyboard and select its port under **MIDI input**. Played notes appear in **Incoming MIDI**.
 2. Hold a low C with your left hand, with E and G in your right. The **Full Keyboard** display should show **C major**. Add a passing D while holding the other notes and the display should stay on **C major**.
 3. Click **Play** to hear the built-in drums and bass through the Mac's default audio output. Try A, C and E to change to A minor. The bass follows the recognised chord on its next scheduled note.
-4. Click **Main B**, then **Fill** before the next downbeat. The next bar is a one-bar fill, followed by Main B. Selecting Main B on its own switches at the next bar without a fill.
+4. Click **Main B**, then **Fill** during playback. Fill starts immediately, even between beats, plays through the rest of the current bar, and hands off to Main B on the next downbeat. Selecting Main B on its own switches at the next bar.
 5. With playback stopped, click **Intro** to start with a one-bar intro before the selected Main variation. Click **Ending** during playback to play a one-bar ending at the next downbeat and then stop. **Stop** is available during any section.
 6. Use **MIDI Learn** for **START_STOP**, **INTRO**, **MAIN_A**, **MAIN_B**, **MAIN_C**, **FILL**, **BREAK**, **ENDING**, **TEMPO_UP**, and **TEMPO_DOWN**. Mappings save across launches and apply to the selected MIDI input. Select the action and click **Remove** to clear it.
 
@@ -31,7 +31,7 @@ Full Keyboard recognises major and minor triads, dominant sevenths, minor sevent
 
 The MIDI callback updates fixed-size note state and publishes the detected chord and mapped transport commands through lock-free atomics. The independent audio callback schedules the loop by sample count. Device setup, monitoring, display, and settings run off the audio thread. The monitor drains its own bounded queue at 30 Hz and stores the latest 256 events. Audio output opens on the first Play request.
 
-Intro, Fill, and Ending each run for one bar. The latest pending one-bar section takes precedence over a plain Main change. A Main selection made during Intro or Fill determines the following variation. Ending finishes playback and clears pending sections.
+Intro and Ending each run for one bar. The latest queued section takes precedence over a plain Main change. Fill starts on the next audio callback without resetting the beat. It plays until the next downbeat, where an already queued Intro, Break, or Ending takes precedence over the selected Main variation. Ending finishes playback and clears pending sections.
 
 ## Review saved mappings
 
@@ -50,3 +50,9 @@ Held notes light up in teal while the piano keeps the mapping colors visible. Th
 Clear **Incoming MIDI** and press one hardware button without playing any keys. The monitor hides clock and active sensing by default. A button that sends a Note On, nonzero Control Change, or Program Change can be learned like a key. To learn MIDI Start, Continue, or Stop, select **START_STOP**. Learning any one of the three binds the transport pair. Start and Continue request playback, and Stop requests silence. This controls transport without syncing tempo to MIDI clock.
 
 Some arranger panel buttons control only the keyboard's own functions. If the button sends no assignable event, the app has no MIDI event to map. Generated accompaniment notes are not dedicated button messages.
+
+## Laptop shortcuts
+
+With the arranger window focused, press **Space** for Play/Stop, **1/2/3** for Main A/B/C, **I** for Intro, **F** for Fill, **B** for Break, **E** for Ending, and **-** or **=** for tempo. The keys appear on the playback buttons. Hold a tempo shortcut or either on-screen BPM button to keep changing tempo. The laptop uses the system keyboard repeat rate. Other shortcuts fire once per press. Shortcuts are inactive while typing in a field or capturing a MIDI mapping or keyboard range.
+
+Select an action, click **Set laptop shortcut**, then press an unmodified letter, digit, Space, or punctuation key. Press Escape to cancel. Reusing a key transfers it from the previous action. **Remove shortcut** clears the assignment. Laptop and MIDI assignments save independently.

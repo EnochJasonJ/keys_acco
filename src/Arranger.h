@@ -50,28 +50,38 @@ public:
             if (command == startStop)
                 next = (previous & playingBit) == 0 ? playingBit : 0;
             else if (command == intro)
-                next = playingBit | (introSection << 1);
+                next = playingBit | (previous & immediateFillBit) | (introSection << sectionShift);
             else if ((previous & playingBit) == 0)
                 return;
+            else if (command == fill)
+                next = previous | immediateFillBit;
             else
             {
-                const auto section = command == fill ? fillSection : command == breakBar ? breakSection : endingSection;
-                next = playingBit | (section << 1);
+                const auto section = command == breakBar ? breakSection : endingSection;
+                next = playingBit | (previous & immediateFillBit) | (section << sectionShift);
             }
         }
         while (!transport.compare_exchange_weak(previous, next, std::memory_order_relaxed));
     }
 
     bool isPlaying() const noexcept { return (transport.load(std::memory_order_relaxed) & playingBit) != 0; }
-    int queuedSection() const noexcept { return transport.load(std::memory_order_relaxed) >> 1; }
+    int queuedSection() const noexcept { return transport.load(std::memory_order_relaxed) >> sectionShift; }
     void stop() noexcept { transport.store(0, std::memory_order_relaxed); }
+
+    bool takeImmediateFill() noexcept
+    {
+        if ((transport.load(std::memory_order_relaxed) & immediateFillBit) == 0)
+            return false;
+        const auto state = transport.fetch_and(~immediateFillBit, std::memory_order_relaxed);
+        return (state & (playingBit | immediateFillBit)) == (playingBit | immediateFillBit);
+    }
 
     int takeNextSection() noexcept
     {
-        const auto state = transport.fetch_and(playingBit, std::memory_order_relaxed);
+        const auto state = transport.fetch_and(playingBit | immediateFillBit, std::memory_order_relaxed);
         if ((state & playingBit) == 0)
             return -1;
-        const auto queued = state >> 1;
+        const auto queued = state >> sectionShift;
         return queued != 0 ? queued : requested.load(std::memory_order_relaxed);
     }
 
@@ -161,6 +171,8 @@ private:
     static int encode(MidiTrigger trigger) noexcept { return (trigger.status << 8) | trigger.number; }
 
     static constexpr int playingBit = 1;
+    static constexpr int immediateFillBit = 2;
+    static constexpr int sectionShift = 2;
     std::atomic<int> transport { 0 };
     std::atomic<int> tempo { 108 };
     static_assert(std::atomic<std::uint32_t>::is_always_lock_free);

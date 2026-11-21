@@ -14,6 +14,28 @@ constexpr std::array actions {
     "START_STOP", "TEMPO_UP", "TEMPO_DOWN"
 };
 
+constexpr std::array commands {
+    LiveControls::intro, LiveControls::mainA, LiveControls::mainB, LiveControls::mainC,
+    LiveControls::fill, LiveControls::breakBar, LiveControls::ending,
+    LiveControls::startStop, LiveControls::tempoUp, LiveControls::tempoDown
+};
+constexpr std::array defaultShortcuts { 'I', '1', '2', '3', 'F', 'B', 'E', ' ', '=', '-' };
+
+constexpr int normalizeShortcut(int code)
+{
+    return code >= 'a' && code <= 'z' ? code - 'a' + 'A' : code;
+}
+
+constexpr bool isShortcut(int code)
+{
+    return code >= ' ' && code <= '~';
+}
+
+juce::String shortcutSetting(std::size_t index)
+{
+    return "shortcut." + juce::String(actions[index]);
+}
+
 juce::PropertiesFile::Options settingsOptions()
 {
     juce::PropertiesFile::Options options;
@@ -64,8 +86,12 @@ class MainView final : public juce::Component, private juce::Timer, private juce
 public:
     MainView()
     {
+        setWantsKeyboardFocus(true);
         for (std::size_t i = 0; i < actions.size(); ++i)
         {
+            const auto key = normalizeShortcut(settings.getIntValue(shortcutSetting(i), defaultShortcuts[i]));
+            if (isShortcut(key) && std::find(shortcuts.begin(), shortcuts.end(), key) == shortcuts.end())
+                shortcuts[i] = key;
             action.addItem(actions[i], static_cast<int>(i) + 1);
             const auto stored = settings.getIntValue(actions[i], -1);
             if (stored >= 0 && MidiTrigger::valid(stored >> 8, stored & 0xff)
@@ -82,6 +108,7 @@ public:
         learnLabel.attachToComponent(&action, false);
         mappingTitle.setText("Key mappings", juce::dontSendNotification);
         emptyMappings.setText("Learn an action to see its mapping here.", juce::dontSendNotification);
+        shortcutLabel.setColour(juce::Label::textColourId, juce::Colour(0xffe3e8ef));
         monitorLabel.setText("Incoming MIDI", juce::dontSendNotification);
         device.setTitle("MIDI input");
         action.setTitle("Arranger action");
@@ -92,17 +119,19 @@ public:
         for (auto* label : { &title, &inputLabel, &inputStatus, &learnLabel, &binding, &activity, &monitorLabel, &playback, &harmony, &mappingTitle, &emptyMappings, &beatLabel })
             label->setColour(juce::Label::textColourId, juce::Colour(0xffe3e8ef));
         action.setSelectedId(1, juce::dontSendNotification);
-        for (auto* component : std::array<juce::Component*, 31> {
+        for (auto* component : std::array<juce::Component*, 34> {
                  &title, &inputLabel, &device, &inputStatus, &learnLabel, &action, &learn,
                  &remove, &binding, &activity, &monitorLabel, &clear, &monitor,
                  &transport, &introButton, &variationA, &variationB, &fillButton, &endingButton,
                  &playback, &harmony, &mappingTitle, &emptyMappings, &keyboard, &rangeButton,
-                 &variationC, &breakButton, &tempoDown, &tempoUp, &beatLabel, &showTiming })
+                 &variationC, &breakButton, &tempoDown, &tempoUp, &beatLabel, &showTiming,
+                 &shortcutLabel, &assignShortcut, &removeShortcut })
             addAndMakeVisible(component);
 
         const auto selectMapping = [this](std::size_t index)
         {
             action.setSelectedId(static_cast<int>(index) + 1, juce::dontSendNotification);
+            capturingShortcut = false;
             cancelLearn();
             updateBinding();
         };
@@ -117,23 +146,35 @@ public:
         }
         refreshMappingView();
 
-        const auto bindButton = [this](juce::TextButton& button, LiveControls::Command command)
+        for (std::size_t i = 0; i < playbackButtons.size(); ++i)
         {
-            button.onClick = [this, command] { live.command(command); updatePlayback(); };
+            playbackButtons[i]->onClick = [this, i] { performAction(i); };
+        }
+
+        for (auto* button : { &tempoDown, &tempoUp })
+        {
+            button->setTriggeredOnMouseDown(true);
+            button->setRepeatSpeed(350, 90);
+        }
+
+        assignShortcut.onClick = [this]
+        {
+            capturingShortcut = !capturingShortcut;
+            cancelLearn();
+            if (capturingShortcut)
+                grabKeyboardFocus();
+            updateBinding();
         };
-        bindButton(transport, LiveControls::startStop);
-        bindButton(introButton, LiveControls::intro);
-        bindButton(variationA, LiveControls::mainA);
-        bindButton(variationB, LiveControls::mainB);
-        bindButton(fillButton, LiveControls::fill);
-        bindButton(endingButton, LiveControls::ending);
-        bindButton(variationC, LiveControls::mainC);
-        bindButton(breakButton, LiveControls::breakBar);
-        bindButton(tempoDown, LiveControls::tempoDown);
-        bindButton(tempoUp, LiveControls::tempoUp);
+        removeShortcut.onClick = [this]
+        {
+            capturingShortcut = false;
+            shortcuts[actionIndex()] = 0;
+            saveShortcuts();
+        };
 
         rangeButton.onClick = [this]
         {
+            capturingShortcut = false;
             if (capturingRange)
                 capturingRange = false;
             else
@@ -151,11 +192,13 @@ public:
         device.onChange = [this] { selectDevice(); };
         action.onChange = [this]
         {
+            capturingShortcut = false;
             cancelLearn();
             updateBinding();
         };
         learn.onClick = [this]
         {
+            capturingShortcut = false;
             if (armed)
                 cancelLearn();
             else
@@ -230,6 +273,12 @@ public:
         controls.removeFromLeft(8);
         remove.setBounds(controls.removeFromLeft(75));
         binding.setBounds(controls.withTrimmedLeft(10));
+        area.removeFromTop(6);
+        auto shortcutRow = area.removeFromTop(28);
+        assignShortcut.setBounds(shortcutRow.removeFromLeft(145));
+        shortcutRow.removeFromLeft(8);
+        removeShortcut.setBounds(shortcutRow.removeFromLeft(112));
+        shortcutLabel.setBounds(shortcutRow.withTrimmedLeft(10));
         activity.setBounds(area.removeFromTop(30));
         auto mappingHeader = area.removeFromTop(27);
         rangeButton.setBounds(mappingHeader.removeFromRight(110).withTrimmedBottom(3));
@@ -262,6 +311,68 @@ public:
         monitor.setBounds(area);
     }
 
+    void resetPressedShortcuts() noexcept { pressed.fill(ShortcutPress::up); }
+
+    bool keyPressed(const juce::KeyPress& key) override
+    {
+        for (auto* focused = getCurrentlyFocusedComponent(); focused != nullptr;
+             focused = focused->getParentComponent())
+            if (dynamic_cast<juce::TextEditor*>(focused) != nullptr)
+                return false;
+
+        const auto code = normalizeShortcut(key.getKeyCode());
+        if (capturingShortcut && code == juce::KeyPress::escapeKey)
+        {
+            capturingShortcut = false;
+            updateBinding();
+            return true;
+        }
+        if (!isShortcut(code) || key.getModifiers().isAnyModifierKeyDown() || armed || capturingRange)
+            return false;
+
+        const auto slot = std::find(shortcuts.begin(), shortcuts.end(), code);
+        const bool mapped = slot != shortcuts.end();
+        auto& down = pressed[static_cast<std::size_t>(code)];
+        if (down != ShortcutPress::up)
+        {
+            if (down == ShortcutPress::repeatingTempo && mapped && !capturingShortcut
+                && isTempoCommand(commands[static_cast<std::size_t>(slot - shortcuts.begin())]))
+                performAction(static_cast<std::size_t>(slot - shortcuts.begin()));
+            return capturingShortcut || mapped;
+        }
+        down = ShortcutPress::down;
+
+        if (capturingShortcut)
+        {
+            if (mapped)
+                *slot = 0;
+            shortcuts[actionIndex()] = code;
+            capturingShortcut = false;
+            saveShortcuts();
+            return true;
+        }
+        if (!mapped)
+            return false;
+
+        const auto index = static_cast<std::size_t>(slot - shortcuts.begin());
+        if (playbackButtons[index]->isEnabled())
+        {
+            if (isTempoCommand(commands[index]))
+                down = ShortcutPress::repeatingTempo;
+            performAction(index);
+        }
+        return true;
+    }
+
+    bool keyStateChanged(bool isKeyDown) override
+    {
+        if (!isKeyDown)
+            for (std::size_t i = 0; i < pressed.size(); ++i)
+                if (pressed[i] != ShortcutPress::up && !juce::KeyPress::isKeyCurrentlyDown(static_cast<int>(i)))
+                    pressed[i] = ShortcutPress::up;
+        return false;
+    }
+
 private:
     void cancelLearn()
     {
@@ -271,16 +382,35 @@ private:
 
     void syncPlaybackBindings()
     {
-        live.setBinding(LiveControls::startStop, bindings[transportActionIndex]);
-        live.setBinding(LiveControls::mainA, bindings[1]);
-        live.setBinding(LiveControls::mainB, bindings[2]);
-        live.setBinding(LiveControls::intro, bindings[0]);
-        live.setBinding(LiveControls::fill, bindings[4]);
-        live.setBinding(LiveControls::ending, bindings[6]);
-        live.setBinding(LiveControls::mainC, bindings[3]);
-        live.setBinding(LiveControls::breakBar, bindings[5]);
-        live.setBinding(LiveControls::tempoUp, bindings[8]);
-        live.setBinding(LiveControls::tempoDown, bindings[9]);
+        for (std::size_t i = 0; i < commands.size(); ++i)
+            live.setBinding(commands[i], bindings[i]);
+    }
+
+    static bool isTempoCommand(LiveControls::Command command)
+    {
+        return command == LiveControls::tempoUp || command == LiveControls::tempoDown;
+    }
+
+    void performAction(std::size_t index)
+    {
+        live.command(commands[index]);
+        updatePlayback();
+    }
+
+    static juce::String shortcutName(int code)
+    {
+        return code == ' ' ? juce::String("Space")
+                           : juce::String::charToString(static_cast<juce::juce_wchar>(code));
+    }
+
+    void saveShortcuts()
+    {
+        for (std::size_t i = 0; i < shortcuts.size(); ++i)
+            settings.setValue(shortcutSetting(i), shortcuts[i]);
+        if (!settings.saveIfNeeded())
+            activity.setText("Could not save laptop shortcuts", juce::dontSendNotification);
+        updateBinding();
+        updatePlayback();
     }
 
     void updatePlayback()
@@ -306,7 +436,15 @@ private:
         const auto active = arranger.activeSection();
         const auto queued = live.queuedSection();
         const auto sectionName = [](int section) { return sectionNames[static_cast<std::size_t>(section)]; };
-        transport.setButtonText(playing ? "Stop" : "Play");
+        constexpr std::array buttonNames { "Intro", "Main A", "Main B", "Main C", "Fill", "Break",
+                                           "Ending", "Play", "BPM +", "BPM -" };
+        for (std::size_t i = 0; i < playbackButtons.size(); ++i)
+        {
+            juce::String text = i == transportActionIndex && playing ? "Stop" : buttonNames[i];
+            if (shortcuts[i] != 0)
+                text += " [" + shortcutName(shortcuts[i]) + "]";
+            playbackButtons[i]->setButtonText(text);
+        }
         fillButton.setEnabled(playing && active != endingSection);
         endingButton.setEnabled(playing && active != endingSection);
         breakButton.setEnabled(playing && active != endingSection);
@@ -466,6 +604,13 @@ private:
         const auto index = actionIndex();
         const auto& current = bindings[index];
         keyboard.select(index);
+        assignShortcut.setEnabled(!capturingRange);
+        assignShortcut.setButtonText(capturingShortcut ? "Cancel shortcut" : "Set laptop shortcut");
+        removeShortcut.setEnabled(!capturingShortcut && shortcuts[index] != 0);
+        shortcutLabel.setText(capturingShortcut ? "Press a key for " + juce::String(actions[index])
+                                                : shortcuts[index] == 0 ? juce::String("Laptop shortcut unassigned")
+                                                                       : "Laptop shortcut  |  " + shortcutName(shortcuts[index]),
+                              juce::dontSendNotification);
         learn.setButtonText(armed ? "Cancel" : "Learn");
         learn.setEnabled(activeId.isNotEmpty() && !capturingRange);
         remove.setEnabled(current.has_value());
@@ -613,6 +758,10 @@ private:
     juce::String activeId;
     juce::MidiDeviceListConnection deviceChanges;
     std::array<std::optional<MidiTrigger>, actions.size()> bindings {};
+    std::array<int, actions.size()> shortcuts {};
+    enum class ShortcutPress { up, down, repeatingTempo };
+    std::array<ShortcutPress, 127> pressed {};
+    bool capturingShortcut = false;
     std::optional<std::size_t> armed;
     std::optional<int> capturedLow;
     int firstKey = 0;
@@ -624,7 +773,7 @@ private:
     juce::uint64 dropped = 0;
 
     juce::Label title, inputLabel, inputStatus, learnLabel, binding, activity, monitorLabel, playback, harmony;
-    juce::Label mappingTitle, emptyMappings, beatLabel;
+    juce::Label mappingTitle, emptyMappings, beatLabel, shortcutLabel;
     MappingKeyboard<actions.size()> keyboard { bindings, actions, live };
     std::array<juce::TextButton, actions.size()> mappingButtons;
     juce::TooltipWindow keyTooltips { this };
@@ -634,6 +783,11 @@ private:
                      variationB { "Main B" }, variationC { "Main C" }, fillButton { "Fill" },
                      breakButton { "Break" }, endingButton { "Ending" },
                      tempoDown { "BPM -" }, tempoUp { "BPM +" };
+    std::array<juce::TextButton*, actions.size()> playbackButtons {
+        &introButton, &variationA, &variationB, &variationC, &fillButton, &breakButton,
+        &endingButton, &transport, &tempoUp, &tempoDown
+    };
+    juce::TextButton assignShortcut { "Set laptop shortcut" }, removeShortcut { "Remove shortcut" };
     juce::ToggleButton showTiming;
     juce::ListBox monitor { "Incoming MIDI", this };
 };
@@ -649,6 +803,14 @@ public:
         setResizeLimits(740, 660, 2000, 1400);
         centreWithSize(getWidth(), getHeight());
         setVisible(true);
+        getContentComponent()->grabKeyboardFocus();
+    }
+
+    void activeWindowStatusChanged() override
+    {
+        DocumentWindow::activeWindowStatusChanged();
+        if (auto* view = static_cast<MainView*>(getContentComponent()))
+            view->resetPressedShortcuts();
     }
 
     void closeButtonPressed() override { juce::JUCEApplication::getInstance()->systemRequestedQuit(); }
@@ -658,7 +820,7 @@ class ArrangerApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "MIDI Arranger"; }
-    const juce::String getApplicationVersion() override { return "0.4.1"; }
+    const juce::String getApplicationVersion() override { return "0.4.4"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override { window = std::make_unique<MainWindow>(); }
     void shutdown() override { window.reset(); }

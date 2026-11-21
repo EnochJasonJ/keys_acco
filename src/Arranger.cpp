@@ -140,6 +140,14 @@ void Arranger::audioDeviceIOCallbackWithContext(const float* const*, int, float*
         beginStep(step);
     }
 
+    if (live.takeImmediateFill() && running && section != endingSection)
+    {
+        section = fillSection;
+        active.store(section, std::memory_order_relaxed);
+        snare = 1.0f;
+        hat = 0.60f;
+    }
+
     const double stepAdvance = live.bpm() * 2.0 / (60.0 * sampleRate);
     for (int i = 0; i < samples; ++i)
     {
