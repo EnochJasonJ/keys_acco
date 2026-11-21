@@ -56,3 +56,9 @@ Some arranger panel buttons control only the keyboard's own functions. If the bu
 With the arranger window focused, press **Space** for Play/Stop, **1/2/3** for Main A/B/C, **I** for Intro, **F** for Fill, **B** for Break, **E** for Ending, and **-** or **=** for tempo. The keys appear on the playback buttons. Hold a tempo shortcut or either on-screen BPM button to keep changing tempo. The laptop uses the system keyboard repeat rate. Other shortcuts fire once per press. Shortcuts are inactive while typing in a field or capturing a MIDI mapping or keyboard range.
 
 Select an action, click **Set laptop shortcut**, then press an unmodified letter, digit, Space, or punctuation key. Press Escape to cancel. Reusing a key transfers it from the previous action. **Remove shortcut** clears the assignment. Laptop and MIDI assignments save independently.
+
+## Build a style from the timeline
+
+The **Style timeline** starts with seven bars of drum and bass patterns. Drag across the bars or choose **From** and **To**, choose an arranger section, and click **Assign bars**. The outline shows the source bar playing live. You can reuse the same source bars in several sections. **Save style** saves the timeline and all section assignments to a local `.keysstyle` file. **Open style** loads a saved file while transport is stopped.
+
+Main variations loop their assigned range and can switch on the next downbeat. Intro, Break, and Fill play their assigned range once. Fill enters the first assigned bar at the current beat position and plays any remaining bars before handing off. Ending plays its assigned range and stops. Assignments take effect the next time a section starts or loops. The style file currently supports up to 64 bars with two built-in instrument tracks in 4/4 and an eighth-note grid. MIDI import, note editing, and instrument plug-ins are later milestones.

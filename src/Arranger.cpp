@@ -44,45 +44,65 @@ void Arranger::reset() noexcept
     running = false;
     active.store(-1, std::memory_order_relaxed);
     beat.store(0, std::memory_order_relaxed);
+    visibleBar.store(-1, std::memory_order_relaxed);
     kick = snare = hat = bass = 0;
 }
 
 void Arranger::audioDeviceStopped() { reset(); }
 
-void Arranger::beginStep(int index) noexcept
+void Arranger::enterSection(int next) noexcept
 {
-    struct Pattern { unsigned kick, snare, bass; };
-    constexpr std::array patterns {
-        Pattern { 0b00010001, 0b01000100, 0b00010001 }, // Main A
-        Pattern { 0b00101001, 0b01000100, 0b01010101 }, // Main B
-        Pattern { 0b01000001, 0b10010000, 0b00010001 }, // Intro
-        Pattern { 0b00100001, 0b11010100, 0b01000101 }, // Fill
-        Pattern { 0b00010001, 0b00010100, 0b00010001 }, // Ending
-        Pattern { 0b10010101, 0b01010100, 0b10101011 }, // Main C
-        Pattern { 0b00000001, 0b00000001, 0b00000001 }  // Break
-    };
+    section = next;
+    const auto range = ranges[static_cast<std::size_t>(next)].load(std::memory_order_relaxed);
+    sectionRange = { range / StyleTimeline::maxBars, range % StyleTimeline::maxBars };
+    bar = sectionRange.first;
+    active.store(section, std::memory_order_relaxed);
+    visibleBar.store(bar, std::memory_order_relaxed);
+}
 
-    if (index == 0)
+void Arranger::beginBar(bool starting) noexcept
+{
+    if (!starting && section == endingSection)
     {
-        section = live.takeNextSection();
-        if (section < 0)
+        if (bar == sectionRange.last)
         {
+            live.stop();
             reset();
-            return;
         }
-        active.store(section, std::memory_order_relaxed);
+        else
+            visibleBar.store(++bar, std::memory_order_relaxed);
+        return;
     }
 
+    const int queued = live.takeQueuedSection();
+    if (queued < 0)
+    {
+        reset();
+        return;
+    }
+
+    const int selected = live.requested.load(std::memory_order_relaxed);
+    const bool isMain = section == mainASection || section == mainBSection || section == mainCSection;
+    if (queued != 0)
+        enterSection(queued);
+    else if (starting || (isMain && selected != section) || bar == sectionRange.last)
+        enterSection(selected);
+    else
+        visibleBar.store(++bar, std::memory_order_relaxed);
+}
+
+void Arranger::beginStep(int index) noexcept
+{
     if (index % 2 == 0)
         beat.store(index / 2 + 1, std::memory_order_relaxed);
-    if (section == breakSection && index >= 2)
+    const auto& pattern = bars[static_cast<std::size_t>(bar)];
+    const auto bit = 1u << index;
+    if ((pattern.cutTails & bit) != 0)
     {
         kick = snare = hat = bass = 0;
         return;
     }
-    const auto& pattern = patterns[static_cast<std::size_t>(section)];
-    const auto bit = 1u << index;
-    hat = (section == endingSection && index > 4) ? 0.0f : (index % 2 == 0 ? 0.55f : 0.85f);
+    hat = (pattern.hat & bit) != 0 ? (index % 2 == 0 ? 0.55f : 0.85f) : 0.0f;
     if ((pattern.snare & bit) != 0)
         snare = 1.0f;
     if ((pattern.kick & bit) != 0)
@@ -98,7 +118,7 @@ void Arranger::beginStep(int index) noexcept
         constexpr std::array fifths { 7, 7, 7, 7, 7, 7, 7, 6, 8 };
         constexpr std::array accents { 4, 3, 10, 10, 11, 2, 5, 3, 4 };
         const auto chordQuality = static_cast<std::size_t>(quality);
-        const int interval = index == 4 && section != endingSection ? fifths[chordQuality]
+        const int interval = index == 4 && pattern.bassFifthOnBeatThree ? fifths[chordQuality]
                            : index == 6 ? accents[chordQuality] : 0;
         bassAdvance = bassRates[static_cast<std::size_t>((root + interval) % 12)];
         bass = 1.0f;
@@ -137,13 +157,14 @@ void Arranger::audioDeviceIOCallbackWithContext(const float* const*, int, float*
         running = true;
         step = 0;
         stepPhase = 0;
-        beginStep(step);
+        beginBar(true);
+        if (running)
+            beginStep(step);
     }
 
     if (live.takeImmediateFill() && running && section != endingSection)
     {
-        section = fillSection;
-        active.store(section, std::memory_order_relaxed);
+        enterSection(fillSection);
         snare = 1.0f;
         hat = 0.60f;
     }
@@ -162,12 +183,9 @@ void Arranger::audioDeviceIOCallbackWithContext(const float* const*, int, float*
         {
             stepPhase -= 1.0;
             step = (step + 1) % stepsPerBar;
-            if (step == 0 && section == endingSection)
-            {
-                live.stop();
-                reset();
-            }
-            else
+            if (step == 0)
+                beginBar(false);
+            if (running)
                 beginStep(step);
         }
     }

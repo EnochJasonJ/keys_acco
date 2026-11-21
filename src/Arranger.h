@@ -2,11 +2,10 @@
 
 #include "ChordDetector.h"
 #include "MidiEvent.h"
+#include "StyleTimeline.h"
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <algorithm>
 #include <atomic>
-
-enum Section { mainASection, mainBSection, introSection, fillSection, endingSection, mainCSection, breakSection };
 
 class LiveControls
 {
@@ -76,13 +75,12 @@ public:
         return (state & (playingBit | immediateFillBit)) == (playingBit | immediateFillBit);
     }
 
-    int takeNextSection() noexcept
+    int takeQueuedSection() noexcept
     {
         const auto state = transport.fetch_and(playingBit | immediateFillBit, std::memory_order_relaxed);
         if ((state & playingBit) == 0)
             return -1;
-        const auto queued = state >> sectionShift;
-        return queued != 0 ? queued : requested.load(std::memory_order_relaxed);
+        return state >> sectionShift;
     }
 
     using HeldNotes = std::array<std::uint32_t, 4>;
@@ -184,7 +182,28 @@ private:
 class Arranger final : public juce::AudioIODeviceCallback
 {
 public:
-    explicit Arranger(LiveControls& controls) : live(controls) {}
+    explicit Arranger(LiveControls& controls) : live(controls)
+    {
+        replaceTimeline(StyleTimeline::starter());
+    }
+
+    // Replacing the source data requires a disconnected audio callback.
+    void replaceTimeline(const StyleTimeline& timeline)
+    {
+        bars = timeline.bars;
+        for (std::size_t i = 0; i < timeline.assignments.size(); ++i)
+            setRange(i, timeline.assignments[i]);
+    }
+
+    void setRange(std::size_t sectionIndex, BarRange range) noexcept
+    {
+        if (sectionIndex < ranges.size() && range.first >= 0 && range.last >= range.first
+            && range.last < static_cast<int>(bars.size()))
+            ranges[sectionIndex].store(range.first * StyleTimeline::maxBars + range.last,
+                                       std::memory_order_relaxed);
+    }
+
+    int timelineBar() const noexcept { return visibleBar.load(std::memory_order_relaxed); }
 
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
@@ -196,10 +215,17 @@ public:
 
 private:
     void reset() noexcept;
+    void enterSection(int next) noexcept;
+    void beginBar(bool starting) noexcept;
     void beginStep(int step) noexcept;
     float nextSample() noexcept;
 
     LiveControls& live;
+    std::vector<StyleBar> bars;
+    std::array<std::atomic<int>, sectionCount> ranges {};
+    std::atomic<int> visibleBar { -1 };
+    BarRange sectionRange { 0, 0 };
+    int bar = 0;
     std::atomic<int> active { -1 };
     std::atomic<int> beat { 0 };
     double sampleRate = 48000;

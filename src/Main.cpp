@@ -1,12 +1,12 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "MidiInput.h"
 #include "MappingKeyboard.h"
+#include "StyleFile.h"
+#include "TimelineGrid.h"
 #include <deque>
 
 namespace
 {
-constexpr std::array sectionNames { "Main A", "Main B", "Intro", "Fill", "Ending", "Main C", "Break" };
-
 constexpr std::size_t transportActionIndex = 7;
 
 constexpr std::array actions {
@@ -109,6 +109,7 @@ public:
         mappingTitle.setText("Key mappings", juce::dontSendNotification);
         emptyMappings.setText("Learn an action to see its mapping here.", juce::dontSendNotification);
         shortcutLabel.setColour(juce::Label::textColourId, juce::Colour(0xffe3e8ef));
+        configureTimeline();
         monitorLabel.setText("Incoming MIDI", juce::dontSendNotification);
         device.setTitle("MIDI input");
         action.setTitle("Arranger action");
@@ -229,7 +230,7 @@ public:
         updateBinding();
         deviceChanges = juce::MidiDeviceListConnection::make([this] { refreshDevices(); });
         updatePlayback();
-        setSize(920, 745);
+        setSize(980, 880);
     }
 
     ~MainView() override
@@ -240,6 +241,7 @@ public:
         audio.removeAudioCallback(&arranger);
         audio.closeAudioDevice();
         monitor.setModel(nullptr);
+        timelineViewport.setViewedComponent(nullptr);
     }
 
     void paint(juce::Graphics& graphics) override { graphics.fillAll(juce::Colour(0xff202329)); }
@@ -280,6 +282,23 @@ public:
         removeShortcut.setBounds(shortcutRow.removeFromLeft(112));
         shortcutLabel.setBounds(shortcutRow.withTrimmedLeft(10));
         activity.setBounds(area.removeFromTop(30));
+        auto timelineHeader = area.removeFromTop(28);
+        saveStyleButton.setBounds(timelineHeader.removeFromRight(84).withTrimmedBottom(4));
+        timelineHeader.removeFromRight(6);
+        openStyleButton.setBounds(timelineHeader.removeFromRight(84).withTrimmedBottom(4));
+        timelineTitle.setBounds(timelineHeader);
+        timelineViewport.setBounds(area.removeFromTop(86));
+        resizeTimelineGrid();
+        auto assignmentRow = area.removeFromTop(28).withTrimmedTop(3);
+        firstBar.setBounds(assignmentRow.removeFromLeft(104));
+        assignmentRow.removeFromLeft(6);
+        lastBar.setBounds(assignmentRow.removeFromLeft(104));
+        assignmentRow.removeFromLeft(8);
+        targetSection.setBounds(assignmentRow.removeFromLeft(104));
+        assignmentRow.removeFromLeft(6);
+        assignBars.setBounds(assignmentRow.removeFromLeft(96));
+        timelineStatus.setBounds(assignmentRow.withTrimmedLeft(8));
+        area.removeFromTop(6);
         auto mappingHeader = area.removeFromTop(27);
         rangeButton.setBounds(mappingHeader.removeFromRight(110).withTrimmedBottom(3));
         mappingTitle.setBounds(mappingHeader);
@@ -374,6 +393,148 @@ public:
     }
 
 private:
+    void configureTimeline()
+    {
+        for (auto* label : { &timelineTitle, &timelineStatus })
+            label->setColour(juce::Label::textColourId, juce::Colour(0xffe3e8ef));
+        for (auto* component : std::array<juce::Component*, 9> {
+                 &timelineTitle, &timelineStatus, &timelineViewport, &openStyleButton, &saveStyleButton,
+                 &firstBar, &lastBar, &targetSection, &assignBars })
+            addAndMakeVisible(component);
+
+        timelineViewport.setViewedComponent(&timelineGrid, false);
+        timelineViewport.setScrollBarsShown(false, true);
+        timelineViewport.setScrollBarThickness(12);
+        firstBar.setTitle("First bar");
+        lastBar.setTitle("Last bar");
+        targetSection.setTitle("Section to assign");
+        for (int i = 0; i < sectionCount; ++i)
+            targetSection.addItem(sectionNames[static_cast<std::size_t>(i)], i + 1);
+        targetSection.setSelectedId(mainASection + 1, juce::dontSendNotification);
+        targetSection.onChange = [this] { updateTimelineStatus(); };
+        timelineGrid.onSelection = [this](BarRange range) { selectBars(range); };
+        firstBar.onChange = [this]
+        {
+            const int first = firstBar.getSelectedId() - 1;
+            selectBars({ first, std::max(first, barSelection.last) });
+        };
+        lastBar.onChange = [this]
+        {
+            const int last = lastBar.getSelectedId() - 1;
+            selectBars({ std::min(last, barSelection.first), last });
+        };
+
+        assignBars.onClick = [this]
+        {
+            const auto index = static_cast<std::size_t>(targetSection.getSelectedId() - 1);
+            style.assignments[index] = barSelection;
+            arranger.setRange(index, barSelection);
+            styleDirty = true;
+            updateTimelineStatus();
+        };
+        openStyleButton.onClick = [this] { chooseStyleFile(false); };
+        saveStyleButton.onClick = [this] { chooseStyleFile(true); };
+        populateBarSelectors();
+    }
+
+    void resizeTimelineGrid()
+    {
+        const auto width = TimelineGrid::labelWidth + static_cast<int>(style.bars.size()) * TimelineGrid::minimumBarWidth;
+        timelineGrid.setSize(std::max(width, timelineViewport.getWidth()), 72);
+    }
+
+    void populateBarSelectors()
+    {
+        for (auto* selector : { &firstBar, &lastBar })
+        {
+            selector->clear(juce::dontSendNotification);
+            for (int i = 1; i <= static_cast<int>(style.bars.size()); ++i)
+                selector->addItem(juce::String(selector == &firstBar ? "From " : "To ") + juce::String(i), i);
+        }
+        selectBars(style.assignments[static_cast<std::size_t>(targetSection.getSelectedId() - 1)]);
+        resizeTimelineGrid();
+        timelineViewport.setViewPosition(0, 0);
+    }
+
+    void selectBars(BarRange range)
+    {
+        barSelection = range;
+        firstBar.setSelectedId(range.first + 1, juce::dontSendNotification);
+        lastBar.setSelectedId(range.last + 1, juce::dontSendNotification);
+        timelineGrid.showSelection(range);
+        updateTimelineStatus();
+    }
+
+    void updateTimelineStatus()
+    {
+        timelineTitle.setText("Style timeline  |  " + styleName + (styleDirty ? " *" : ""), juce::dontSendNotification);
+        const auto assigned = style.assignments[static_cast<std::size_t>(targetSection.getSelectedId() - 1)];
+        timelineStatus.setText("Assigned: " + juce::String(assigned.first + 1) + "-"
+                                   + juce::String(assigned.last + 1),
+                               juce::dontSendNotification);
+    }
+
+    void chooseStyleFile(bool saving)
+    {
+        if (styleChooser != nullptr)
+            return;
+        styleChooser = std::make_unique<juce::FileChooser>(saving ? "Save style" : "Open style",
+                                                           styleFile, "*.keysstyle");
+        const auto flags = juce::FileBrowserComponent::canSelectFiles
+            | (saving ? juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting
+                      : juce::FileBrowserComponent::openMode);
+        styleChooser->launchAsync(flags, [safe = juce::Component::SafePointer<MainView>(this), saving](const auto& chooser)
+        {
+            if (safe == nullptr)
+                return;
+            const auto file = chooser.getResult();
+            safe->styleChooser.reset();
+            if (file != juce::File())
+                safe->useStyleFile(file, saving);
+        });
+    }
+
+    void useStyleFile(juce::File file, bool saving)
+    {
+        if (saving)
+        {
+            if (file.getFileExtension().isEmpty())
+                file = file.withFileExtension(".keysstyle");
+            if (!file.replaceWithText(juce::JSON::toString(encodeStyle(style))))
+            {
+                timelineStatus.setText("Could not save style", juce::dontSendNotification);
+                return;
+            }
+        }
+        else
+        {
+            if (live.isPlaying())
+            {
+                timelineStatus.setText("Stop playback before opening a style", juce::dontSendNotification);
+                return;
+            }
+            juce::var json;
+            auto parsed = file.getSize() > 0 && file.getSize() <= 256 * 1024
+                && juce::JSON::parse(file.loadFileAsString(), json).wasOk() ? decodeStyle(json) : std::nullopt;
+            if (!parsed)
+            {
+                timelineStatus.setText("Invalid style file", juce::dontSendNotification);
+                return;
+            }
+            if (audioReady)
+                audio.removeAudioCallback(&arranger);
+            arranger.replaceTimeline(*parsed);
+            style = std::move(*parsed);
+            if (audioReady)
+                audio.addAudioCallback(&arranger);
+            populateBarSelectors();
+        }
+        styleFile = file;
+        styleName = file.getFileNameWithoutExtension();
+        styleDirty = false;
+        updateTimelineStatus();
+    }
+
     void cancelLearn()
     {
         armed.reset();
@@ -432,6 +593,8 @@ private:
         }
 
         const bool playing = live.isPlaying();
+        openStyleButton.setEnabled(!playing);
+        timelineGrid.showPlayhead(playing ? arranger.timelineBar() : -1);
         const auto selected = live.requested.load(std::memory_order_relaxed);
         const auto active = arranger.activeSection();
         const auto queued = live.queuedSection();
@@ -747,6 +910,12 @@ private:
         graphics.drawText(text, 10, 0, width - 20, height, juce::Justification::centredLeft, true);
     }
 
+    StyleTimeline style = StyleTimeline::starter();
+    BarRange barSelection { 0, 0 };
+    juce::String styleName { "Starter" };
+    juce::File styleFile;
+    bool styleDirty = false;
+
     LiveControls live;
     Arranger arranger { live };
     juce::AudioDeviceManager audio;
@@ -788,6 +957,13 @@ private:
         &endingButton, &transport, &tempoUp, &tempoDown
     };
     juce::TextButton assignShortcut { "Set laptop shortcut" }, removeShortcut { "Remove shortcut" };
+    juce::Label timelineTitle, timelineStatus;
+    TimelineGrid timelineGrid { style };
+    juce::Viewport timelineViewport;
+    juce::ComboBox firstBar, lastBar, targetSection;
+    juce::TextButton openStyleButton { "Open style" }, saveStyleButton { "Save style" },
+                     assignBars { "Assign bars" };
+    std::unique_ptr<juce::FileChooser> styleChooser;
     juce::ToggleButton showTiming;
     juce::ListBox monitor { "Incoming MIDI", this };
 };
@@ -800,7 +976,7 @@ public:
         setUsingNativeTitleBar(true);
         setContentOwned(new MainView, true);
         setResizable(true, false);
-        setResizeLimits(740, 660, 2000, 1400);
+        setResizeLimits(740, 790, 2000, 1400);
         centreWithSize(getWidth(), getHeight());
         setVisible(true);
         getContentComponent()->grabKeyboardFocus();
@@ -820,7 +996,7 @@ class ArrangerApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "MIDI Arranger"; }
-    const juce::String getApplicationVersion() override { return "0.4.4"; }
+    const juce::String getApplicationVersion() override { return "0.5.0"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override { window = std::make_unique<MainWindow>(); }
     void shutdown() override { window.reset(); }
