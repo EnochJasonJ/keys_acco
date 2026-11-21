@@ -164,6 +164,7 @@ public:
     std::atomic<int> chord { -1 };
     std::atomic<int> requested { 0 };
     std::atomic<int> learning { 0 };
+    std::atomic<int> recording { 0 };
 
 private:
     static int encode(MidiTrigger trigger) noexcept { return (trigger.status << 8) | trigger.number; }
@@ -188,11 +189,19 @@ public:
     }
 
     // Replacing the source data requires a disconnected audio callback.
-    void replaceTimeline(const StyleTimeline& timeline)
+    void replaceTimeline(const StyleTimeline& timeline);
+    void prepareRecording(BarRange range, int track);
+    double recordingEpoch() const noexcept { return recordEpoch.load(std::memory_order_acquire); }
+    bool recordingEnded() const noexcept
     {
-        bars = timeline.bars;
-        for (std::size_t i = 0; i < timeline.assignments.size(); ++i)
-            setRange(i, timeline.assignments[i]);
+        const auto end = recordEndEpoch.load(std::memory_order_acquire);
+        return end > 0 && juce::Time::getMillisecondCounterHiRes() >= end;
+    }
+
+    bool isCountingIn() const noexcept
+    {
+        const auto start = recordingEpoch();
+        return start == 0 || juce::Time::getMillisecondCounterHiRes() < start;
     }
 
     void setRange(std::size_t sectionIndex, BarRange range) noexcept
@@ -204,6 +213,7 @@ public:
     }
 
     int timelineBar() const noexcept { return visibleBar.load(std::memory_order_relaxed); }
+    int timelineTick() const noexcept { return visibleTick.load(std::memory_order_relaxed); }
 
     void audioDeviceAboutToStart(juce::AudioIODevice* device) override;
     void audioDeviceStopped() override;
@@ -218,22 +228,44 @@ private:
     void enterSection(int next) noexcept;
     void beginBar(bool starting) noexcept;
     void beginStep(int step) noexcept;
+    void updateTimelineBar(bool contiguous) noexcept;
+    void playRecordedEvents(double tick) noexcept;
+    void beginRecordingBar(bool starting, double outputTimeMs) noexcept;
+    void triggerClick(int step) noexcept;
+    bool trackEnabled(int track) const noexcept;
     float nextSample() noexcept;
 
     LiveControls& live;
+    struct PlaybackEvent { int tick, track, pitch, velocity, id; };
+
     std::vector<StyleBar> bars;
+    std::array<std::vector<PlaybackEvent>, StyleTimeline::maxBars> events;
+    std::size_t eventCursor = 0;
+    int bassVoice = -1;
+    std::array<float, 128> noteRates {};
+
+    BarRange recordingRange { 0, 0 };
+    int recordingTrack = drumsTrack;
+    bool renderingRecording = false;
+    bool countingIn = false;
+    static_assert(std::atomic<double>::is_always_lock_free);
+    std::atomic<double> recordEpoch { 0 };
+    std::atomic<double> recordEndEpoch { 0 };
     std::array<std::atomic<int>, sectionCount> ranges {};
     std::atomic<int> visibleBar { -1 };
+    std::atomic<int> visibleTick { -1 };
     BarRange sectionRange { 0, 0 };
     int bar = 0;
     std::atomic<int> active { -1 };
     std::atomic<int> beat { 0 };
     double sampleRate = 48000;
+    double outputLatencyMs = 0;
     double stepPhase = 0;
     int step = 0;
     int section = mainASection;
     bool running = false;
 
+    float click = 0, clickPhase = 0, clickAdvance = 0, clickDecay = 0;
     float kickPhase = 0, kick = 0, snare = 0, hat = 0;
     float bassPhase = 0, bass = 0, bassAdvance = 0;
     float kickDecay = 0, snareDecay = 0, hatDecay = 0, bassDecay = 0;

@@ -8,11 +8,24 @@ enum Section { mainASection, mainBSection, introSection, fillSection, endingSect
 
 inline constexpr std::array sectionNames { "Main A", "Main B", "Intro", "Fill", "Ending", "Main C", "Break" };
 
+enum StyleTrack { drumsTrack, bassTrack, trackCount };
+
+inline constexpr std::array kickNotes { 35, 36 };
+inline constexpr std::array snareNotes { 38, 40 };
+inline constexpr int standardHatNote = 42;
+
+struct StyleNote
+{
+    int track, tick, length, pitch, velocity;
+    bool operator==(const StyleNote&) const = default;
+};
+
 struct StyleBar
 {
     unsigned kick, snare, hat, bass;
     unsigned cutTails = 0;
     bool bassFifthOnBeatThree = true;
+    unsigned recordedTracks = 0;
 };
 
 struct BarRange
@@ -26,8 +39,12 @@ struct BarRange
 struct StyleTimeline
 {
     static constexpr int maxBars = 64;
+    static constexpr int ticksPerBeat = 960;
+    static constexpr int ticksPerBar = 4 * ticksPerBeat;
+    static constexpr int maxNotes = 16000;
     std::vector<StyleBar> bars;
     std::array<BarRange, sectionCount> assignments;
+    std::vector<StyleNote> notes;
 
     static StyleTimeline starter()
     {
@@ -42,7 +59,8 @@ struct StyleTimeline
                 { 0x95, 0x54, 0xff, 0xab },                 // Main C
                 { 0x01, 0x01, 0x03, 0x01, 0xfc }            // Break
             },
-            { BarRange { 0, 0 }, { 1, 1 }, { 2, 2 }, { 3, 3 }, { 4, 4 }, { 5, 5 }, { 6, 6 } }
+            { BarRange { 0, 0 }, { 1, 1 }, { 2, 2 }, { 3, 3 }, { 4, 4 }, { 5, 5 }, { 6, 6 } },
+            {}
         };
     }
 };

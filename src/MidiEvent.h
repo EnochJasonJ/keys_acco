@@ -10,6 +10,7 @@ struct MidiEvent
     double time = 0;
     int size = 0;
     std::array<std::uint8_t, 8> bytes {};
+    double arrivalMs = 0;
 };
 
 struct MidiTrigger

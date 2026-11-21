@@ -51,6 +51,8 @@ private:
         MidiEvent event;
         event.time = message.getTimeStamp();
         event.size = message.getRawDataSize();
+        if (event.size == 3 && live.recording.load(std::memory_order_relaxed) != 0)
+            event.arrivalMs = juce::Time::getMillisecondCounterHiRes();
         std::copy_n(message.getRawData(),
                     std::min(event.size, static_cast<int>(event.bytes.size())),
                     event.bytes.begin());
