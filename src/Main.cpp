@@ -1,10 +1,13 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "MidiInput.h"
+#include "MappingKeyboard.h"
 #include <deque>
 
 namespace
 {
-constexpr std::array sectionNames { "Main A", "Main B", "Intro", "Fill", "Ending" };
+constexpr std::array sectionNames { "Main A", "Main B", "Intro", "Fill", "Ending", "Main C", "Break" };
+
+constexpr std::size_t transportActionIndex = 7;
 
 constexpr std::array actions {
     "INTRO", "MAIN_A", "MAIN_B", "MAIN_C", "FILL", "BREAK", "ENDING",
@@ -65,33 +68,54 @@ public:
         {
             action.addItem(actions[i], static_cast<int>(i) + 1);
             const auto stored = settings.getIntValue(actions[i], -1);
-            if (stored >= 0 && MidiTrigger::valid(stored >> 8, stored & 0xff))
+            if (stored >= 0 && MidiTrigger::valid(stored >> 8, stored & 0xff)
+                && (stored >> 8 != MidiTrigger::transportStatus || i == transportActionIndex))
                 bindings[i] = MidiTrigger { stored >> 8, stored & 0xff };
         }
 
         syncPlaybackBindings();
-        playback.setText("108 BPM  |  Full Keyboard", juce::dontSendNotification);
         title.setText("MIDI Arranger", juce::dontSendNotification);
         title.setFont(juce::Font(juce::FontOptions(26.0f, juce::Font::bold)));
         inputLabel.setText("MIDI input", juce::dontSendNotification);
         inputLabel.attachToComponent(&device, false);
         learnLabel.setText("MIDI Learn", juce::dontSendNotification);
         learnLabel.attachToComponent(&action, false);
+        mappingTitle.setText("Key mappings", juce::dontSendNotification);
+        emptyMappings.setText("Learn an action to see its mapping here.", juce::dontSendNotification);
         monitorLabel.setText("Incoming MIDI", juce::dontSendNotification);
         device.setTitle("MIDI input");
         action.setTitle("Arranger action");
+        showTiming.setButtonText("Show clock and sensing");
         monitor.setTitle("Incoming MIDI events");
         monitor.setRowHeight(25);
         monitor.setColour(juce::ListBox::backgroundColourId, juce::Colour(0xff252830));
-        for (auto* label : { &title, &inputLabel, &inputStatus, &learnLabel, &binding, &activity, &monitorLabel, &playback, &harmony })
+        for (auto* label : { &title, &inputLabel, &inputStatus, &learnLabel, &binding, &activity, &monitorLabel, &playback, &harmony, &mappingTitle, &emptyMappings, &beatLabel })
             label->setColour(juce::Label::textColourId, juce::Colour(0xffe3e8ef));
         action.setSelectedId(1, juce::dontSendNotification);
-        for (auto* component : std::array<juce::Component*, 21> {
+        for (auto* component : std::array<juce::Component*, 31> {
                  &title, &inputLabel, &device, &inputStatus, &learnLabel, &action, &learn,
                  &remove, &binding, &activity, &monitorLabel, &clear, &monitor,
                  &transport, &introButton, &variationA, &variationB, &fillButton, &endingButton,
-                 &playback, &harmony })
+                 &playback, &harmony, &mappingTitle, &emptyMappings, &keyboard, &rangeButton,
+                 &variationC, &breakButton, &tempoDown, &tempoUp, &beatLabel, &showTiming })
             addAndMakeVisible(component);
+
+        const auto selectMapping = [this](std::size_t index)
+        {
+            action.setSelectedId(static_cast<int>(index) + 1, juce::dontSendNotification);
+            cancelLearn();
+            updateBinding();
+        };
+        keyboard.onSelect = selectMapping;
+        for (std::size_t i = 0; i < mappingButtons.size(); ++i)
+        {
+            auto& button = mappingButtons[i];
+            button.setColour(juce::TextButton::buttonColourId, mappingColour(i));
+            button.setColour(juce::TextButton::textColourOffId, juce::Colour(0xff18212e));
+            button.onClick = [selectMapping, i] { selectMapping(i); };
+            addChildComponent(button);
+        }
+        refreshMappingView();
 
         const auto bindButton = [this](juce::TextButton& button, LiveControls::Command command)
         {
@@ -103,6 +127,26 @@ public:
         bindButton(variationB, LiveControls::mainB);
         bindButton(fillButton, LiveControls::fill);
         bindButton(endingButton, LiveControls::ending);
+        bindButton(variationC, LiveControls::mainC);
+        bindButton(breakButton, LiveControls::breakBar);
+        bindButton(tempoDown, LiveControls::tempoDown);
+        bindButton(tempoUp, LiveControls::tempoUp);
+
+        rangeButton.onClick = [this]
+        {
+            if (capturingRange)
+                capturingRange = false;
+            else
+            {
+                timerCallback();
+                capturingRange = true;
+                capturedLow.reset();
+            }
+            cancelLearn();
+            updateRangeView();
+            updateBinding();
+        };
+        updateRangeView();
 
         device.onChange = [this] { selectDevice(); };
         action.onChange = [this]
@@ -142,7 +186,7 @@ public:
         updateBinding();
         deviceChanges = juce::MidiDeviceListConnection::make([this] { refreshDevices(); });
         updatePlayback();
-        setSize(780, 600);
+        setSize(920, 745);
     }
 
     ~MainView() override
@@ -162,12 +206,17 @@ public:
         auto area = getLocalBounds().reduced(24);
         title.setBounds(area.removeFromTop(38));
         auto controlsRow = area.removeFromTop(32);
-        for (auto* button : { &transport, &introButton, &variationA, &variationB, &fillButton, &endingButton })
+        for (auto* button : { &transport, &introButton, &variationA, &variationB, &variationC, &fillButton, &breakButton, &endingButton })
         {
-            button->setBounds(controlsRow.removeFromLeft(82));
+            button->setBounds(controlsRow.removeFromLeft(76));
             controlsRow.removeFromLeft(8);
         }
-        playback.setBounds(area.removeFromTop(29));
+        auto statusRow = area.removeFromTop(32).reduced(0, 2);
+        tempoUp.setBounds(statusRow.removeFromRight(68));
+        statusRow.removeFromRight(6);
+        tempoDown.setBounds(statusRow.removeFromRight(68));
+        beatLabel.setBounds(statusRow.removeFromRight(86));
+        playback.setBounds(statusRow);
         harmony.setBounds(area.removeFromTop(29));
         area.removeFromTop(23);
         auto inputs = area.removeFromTop(32);
@@ -182,9 +231,32 @@ public:
         remove.setBounds(controls.removeFromLeft(75));
         binding.setBounds(controls.withTrimmedLeft(10));
         activity.setBounds(area.removeFromTop(30));
-        area.removeFromTop(12);
+        auto mappingHeader = area.removeFromTop(27);
+        rangeButton.setBounds(mappingHeader.removeFromRight(110).withTrimmedBottom(3));
+        mappingTitle.setBounds(mappingHeader);
+        keyboard.setBounds(area.removeFromTop(62));
+        area.removeFromTop(6);
+        if (emptyMappings.isVisible())
+            emptyMappings.setBounds(area.removeFromTop(24));
+        else
+        {
+            juce::Rectangle<int> row;
+            int column = 0;
+            for (auto& button : mappingButtons)
+            {
+                if (!button.isVisible())
+                    continue;
+                if (column == 0)
+                    row = area.removeFromTop(27).withTrimmedBottom(4);
+                const auto width = row.getWidth() / (2 - column);
+                button.setBounds(row.removeFromLeft(width).withTrimmedRight(column == 0 ? 8 : 0));
+                column = (column + 1) % 2;
+            }
+        }
+        area.removeFromTop(10);
         auto header = area.removeFromTop(31);
         clear.setBounds(header.removeFromRight(88));
+        showTiming.setBounds(header.removeFromRight(175).withTrimmedRight(8));
         monitorLabel.setBounds(header);
         area.removeFromTop(6);
         monitor.setBounds(area);
@@ -194,17 +266,21 @@ private:
     void cancelLearn()
     {
         armed.reset();
-        live.learning.store(0, std::memory_order_release);
+        live.learning.store(capturingRange ? 1 : 0, std::memory_order_release);
     }
 
     void syncPlaybackBindings()
     {
-        live.setBinding(LiveControls::startStop, bindings[7]);
+        live.setBinding(LiveControls::startStop, bindings[transportActionIndex]);
         live.setBinding(LiveControls::mainA, bindings[1]);
         live.setBinding(LiveControls::mainB, bindings[2]);
         live.setBinding(LiveControls::intro, bindings[0]);
         live.setBinding(LiveControls::fill, bindings[4]);
         live.setBinding(LiveControls::ending, bindings[6]);
+        live.setBinding(LiveControls::mainC, bindings[3]);
+        live.setBinding(LiveControls::breakBar, bindings[5]);
+        live.setBinding(LiveControls::tempoUp, bindings[8]);
+        live.setBinding(LiveControls::tempoDown, bindings[9]);
     }
 
     void updatePlayback()
@@ -233,7 +309,11 @@ private:
         transport.setButtonText(playing ? "Stop" : "Play");
         fillButton.setEnabled(playing && active != endingSection);
         endingButton.setEnabled(playing && active != endingSection);
-        juce::String playbackText = "108 BPM  |  ";
+        breakButton.setEnabled(playing && active != endingSection);
+        const auto beat = arranger.currentBeat();
+        beatLabel.setText(playing && beat != 0 ? "Beat " + juce::String(beat) + " / 4" : juce::String(),
+                          juce::dontSendNotification);
+        juce::String playbackText = juce::String(live.bpm()) + " BPM  |  ";
         if (audioError.isNotEmpty())
             playbackText = audioError;
         else if (!playing)
@@ -257,11 +337,10 @@ private:
         }
         playback.setText(playbackText, juce::dontSendNotification);
 
-        constexpr std::array names { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B" };
         const auto chord = live.chord.load(std::memory_order_relaxed);
-        constexpr std::array qualities { " major", " minor", "7", "m7", "maj7" };
-        harmony.setText(chord < 0 ? juce::String("Full Keyboard  |  Play a triad or seventh chord")
-                                  : "Full Keyboard  |  " + juce::String(names[static_cast<std::size_t>(chord % 12)])
+        constexpr std::array qualities { " major", " minor", "7", "m7", "maj7", "sus2", "sus4", "dim", "aug" };
+        harmony.setText(chord < 0 ? juce::String("Full Keyboard  |  Play a chord")
+                                  : "Full Keyboard  |  " + juce::String(midiNoteNames[static_cast<std::size_t>(chord % 12)])
                                       + qualities[static_cast<std::size_t>(chord / 12)],
                         juce::dontSendNotification);
 
@@ -297,10 +376,64 @@ private:
                                 juce::dontSendNotification);
     }
 
+    void updateRangeView()
+    {
+        rangeButton.setEnabled(activeId.isNotEmpty());
+        rangeButton.setButtonText(capturingRange ? "Cancel range" : "Set range");
+        juce::String label = "Key mappings";
+        if (capturingRange)
+            label += capturedLow ? "  |  Play the highest key" : "  |  Play the lowest key";
+        else if (activeId.isNotEmpty() && !rangeKnown)
+            label += "  |  Full MIDI range";
+        else if (rangeKnown)
+            label += "  |  " + juce::String(lastKey - firstKey + 1) + " keys  |  "
+                     + midiNoteName(firstKey) + " to " + midiNoteName(lastKey);
+        mappingTitle.setText(label, juce::dontSendNotification);
+    }
+
+    juce::String rangeSetting() const { return "keyboardRange." + activeId; }
+
+    void loadRange(const juce::String& deviceName)
+    {
+        const auto stored = activeId.isNotEmpty() ? settings.getIntValue(rangeSetting(), -1) : -1;
+        const auto model = deviceName.toUpperCase().retainCharacters("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+        const auto low = stored >> 8;
+        const auto high = stored & 0xff;
+        const bool valid = stored >= 0 && low < high && high < 128;
+        const bool psrI500 = model.contains("PSRI500");
+        rangeKnown = valid || psrI500;
+        firstKey = valid ? low : psrI500 ? 36 : 0;
+        lastKey = valid ? high : psrI500 ? 96 : 127;
+        keyboard.setRange(firstKey, lastKey);
+        updateRangeView();
+    }
+
+    void captureRangeNote(int note)
+    {
+        if (!capturedLow)
+            capturedLow = note;
+        else if (note > *capturedLow)
+        {
+            firstKey = *capturedLow;
+            lastKey = note;
+            rangeKnown = true;
+            capturingRange = false;
+            settings.setValue(rangeSetting(), (firstKey << 8) | lastKey);
+            if (!settings.saveIfNeeded())
+                activity.setText("Could not save keyboard range", juce::dontSendNotification);
+            keyboard.setRange(firstKey, lastKey);
+            cancelLearn();
+            updateBinding();
+        }
+        updateRangeView();
+    }
+
     void selectDevice()
     {
+        keyboard.setListening(false);
         input.close();
         activeId.clear();
+        capturingRange = false;
         cancelLearn();
         const auto index = device.getSelectedId() - 2;
         if (juce::isPositiveAndBelow(index, devices.size()))
@@ -320,6 +453,8 @@ private:
         else
             inputStatus.setText(devices.isEmpty() ? "No MIDI inputs found" : "Input off",
                                 juce::dontSendNotification);
+        loadRange(activeId.isNotEmpty() ? devices[index].name : juce::String());
+        keyboard.setListening(activeId.isNotEmpty());
         updateBinding();
         updatePlayback();
     }
@@ -328,17 +463,45 @@ private:
 
     void updateBinding()
     {
-        const auto& current = bindings[actionIndex()];
+        const auto index = actionIndex();
+        const auto& current = bindings[index];
+        keyboard.select(index);
         learn.setButtonText(armed ? "Cancel" : "Learn");
-        learn.setEnabled(activeId.isNotEmpty());
+        learn.setEnabled(activeId.isNotEmpty() && !capturingRange);
         remove.setEnabled(current.has_value());
-        binding.setText(armed ? "Move a control or play a note"
+        binding.setText(armed ? "Press a button, move a control, or play a note"
                               : current ? current->description() : "Unmapped",
                         juce::dontSendNotification);
     }
 
+    void refreshMappingView()
+    {
+        bool hasMappings = false;
+        for (std::size_t i = 0; i < bindings.size(); ++i)
+        {
+            const auto& trigger = bindings[i];
+            auto& button = mappingButtons[i];
+            if (trigger)
+            {
+                const auto kind = trigger->status & 0xf0;
+                juce::String message = trigger->isTransport() ? trigger->description() : kind == 0x90
+                    ? midiNoteName(trigger->number) + " (MIDI " + juce::String(trigger->number) + ")"
+                    : juce::String(kind == 0xb0 ? "CC " : "Program ") + juce::String(trigger->number);
+                button.setButtonText(juce::String(actions[i]) + "  |  " + message
+                                     + (trigger->isTransport() ? juce::String()
+                                                               : "  |  Ch " + juce::String((trigger->status & 15) + 1)));
+                hasMappings = true;
+            }
+            button.setVisible(trigger.has_value());
+        }
+        emptyMappings.setVisible(!hasMappings);
+        keyboard.repaint();
+        resized();
+    }
+
     void saveBindings()
     {
+        refreshMappingView();
         for (std::size_t i = 0; i < actions.size(); ++i)
         {
             if (const auto& trigger = bindings[i])
@@ -355,8 +518,12 @@ private:
         bool changed = false;
         int lastAction = -1;
         bool learned = false;
+        const bool captureBatch = capturingRange;
         input.drain([&](const MidiEvent& event)
         {
+            if (event.size == 1 && (event.bytes[0] == 0xf8 || event.bytes[0] == 0xfe)
+                && !showTiming.getToggleState())
+                return;
             if (!timeOrigin)
                 timeOrigin = event.time;
             if (rows.size() == 256)
@@ -366,8 +533,16 @@ private:
             changed = true;
             if (const auto trigger = MidiTrigger::from(event))
             {
+                if (captureBatch)
+                {
+                    if (capturingRange && (trigger->status & 0xf0) == 0x90)
+                        captureRangeNote(trigger->number);
+                    return;
+                }
                 if (armed)
                 {
+                    if (trigger->isTransport() && *armed != transportActionIndex)
+                        return;
                     for (auto& existing : bindings)
                         if (existing == trigger)
                             existing.reset();
@@ -439,15 +614,27 @@ private:
     juce::MidiDeviceListConnection deviceChanges;
     std::array<std::optional<MidiTrigger>, actions.size()> bindings {};
     std::optional<std::size_t> armed;
+    std::optional<int> capturedLow;
+    int firstKey = 0;
+    int lastKey = 127;
+    bool rangeKnown = false;
+    bool capturingRange = false;
     std::optional<double> timeOrigin;
     std::deque<MidiEvent> rows;
     juce::uint64 dropped = 0;
 
     juce::Label title, inputLabel, inputStatus, learnLabel, binding, activity, monitorLabel, playback, harmony;
+    juce::Label mappingTitle, emptyMappings, beatLabel;
+    MappingKeyboard<actions.size()> keyboard { bindings, actions, live };
+    std::array<juce::TextButton, actions.size()> mappingButtons;
+    juce::TooltipWindow keyTooltips { this };
     juce::ComboBox device, action;
-    juce::TextButton learn { "Learn" }, remove { "Remove" }, clear { "Clear" };
+    juce::TextButton learn { "Learn" }, remove { "Remove" }, clear { "Clear" }, rangeButton { "Set range" };
     juce::TextButton transport { "Play" }, introButton { "Intro" }, variationA { "Main A" },
-                     variationB { "Main B" }, fillButton { "Fill" }, endingButton { "Ending" };
+                     variationB { "Main B" }, variationC { "Main C" }, fillButton { "Fill" },
+                     breakButton { "Break" }, endingButton { "Ending" },
+                     tempoDown { "BPM -" }, tempoUp { "BPM +" };
+    juce::ToggleButton showTiming;
     juce::ListBox monitor { "Incoming MIDI", this };
 };
 
@@ -459,7 +646,7 @@ public:
         setUsingNativeTitleBar(true);
         setContentOwned(new MainView, true);
         setResizable(true, false);
-        setResizeLimits(700, 490, 2000, 1400);
+        setResizeLimits(740, 660, 2000, 1400);
         centreWithSize(getWidth(), getHeight());
         setVisible(true);
     }
@@ -471,7 +658,7 @@ class ArrangerApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "MIDI Arranger"; }
-    const juce::String getApplicationVersion() override { return "0.3.0"; }
+    const juce::String getApplicationVersion() override { return "0.4.1"; }
     bool moreThanOneInstanceAllowed() override { return false; }
     void initialise(const juce::String&) override { window = std::make_unique<MainWindow>(); }
     void shutdown() override { window.reset(); }

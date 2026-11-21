@@ -4,7 +4,6 @@
 
 namespace
 {
-constexpr double bpm = 108.0;
 constexpr int stepsPerBar = 8;
 
 float triangle(float& phase, float advance) noexcept
@@ -28,7 +27,6 @@ float envelope(float& level, float decay) noexcept
 void Arranger::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     sampleRate = device->getCurrentSampleRate();
-    stepAdvance = bpm * 2.0 / (60.0 * sampleRate);
     const auto decay = [&](double seconds) { return static_cast<float>(std::exp(-1.0 / (seconds * sampleRate))); };
     kickDecay = decay(0.070);
     snareDecay = decay(0.045);
@@ -45,6 +43,7 @@ void Arranger::reset() noexcept
 {
     running = false;
     active.store(-1, std::memory_order_relaxed);
+    beat.store(0, std::memory_order_relaxed);
     kick = snare = hat = bass = 0;
 }
 
@@ -58,7 +57,9 @@ void Arranger::beginStep(int index) noexcept
         Pattern { 0b00101001, 0b01000100, 0b01010101 }, // Main B
         Pattern { 0b01000001, 0b10010000, 0b00010001 }, // Intro
         Pattern { 0b00100001, 0b11010100, 0b01000101 }, // Fill
-        Pattern { 0b00010001, 0b00010100, 0b00010001 }  // Ending
+        Pattern { 0b00010001, 0b00010100, 0b00010001 }, // Ending
+        Pattern { 0b10010101, 0b01010100, 0b10101011 }, // Main C
+        Pattern { 0b00000001, 0b00000001, 0b00000001 }  // Break
     };
 
     if (index == 0)
@@ -72,6 +73,13 @@ void Arranger::beginStep(int index) noexcept
         active.store(section, std::memory_order_relaxed);
     }
 
+    if (index % 2 == 0)
+        beat.store(index / 2 + 1, std::memory_order_relaxed);
+    if (section == breakSection && index >= 2)
+    {
+        kick = snare = hat = bass = 0;
+        return;
+    }
     const auto& pattern = patterns[static_cast<std::size_t>(section)];
     const auto bit = 1u << index;
     hat = (section == endingSection && index > 4) ? 0.0f : (index % 2 == 0 ? 0.55f : 0.85f);
@@ -87,9 +95,11 @@ void Arranger::beginStep(int index) noexcept
         const auto chord = live.chord.load(std::memory_order_relaxed);
         const int root = chord >= 0 ? chord % 12 : 0;
         const auto quality = chord >= 0 ? chord / 12 : ChordDetector::major;
-        constexpr std::array accents { 4, 3, 10, 10, 11 };
-        const int interval = index == 4 && section != endingSection ? 7
-                           : index == 6 ? accents[static_cast<std::size_t>(quality)] : 0;
+        constexpr std::array fifths { 7, 7, 7, 7, 7, 7, 7, 6, 8 };
+        constexpr std::array accents { 4, 3, 10, 10, 11, 2, 5, 3, 4 };
+        const auto chordQuality = static_cast<std::size_t>(quality);
+        const int interval = index == 4 && section != endingSection ? fifths[chordQuality]
+                           : index == 6 ? accents[chordQuality] : 0;
         bassAdvance = bassRates[static_cast<std::size_t>((root + interval) % 12)];
         bass = 1.0f;
         bassPhase = 0.25f;
@@ -130,6 +140,7 @@ void Arranger::audioDeviceIOCallbackWithContext(const float* const*, int, float*
         beginStep(step);
     }
 
+    const double stepAdvance = live.bpm() * 2.0 / (60.0 * sampleRate);
     for (int i = 0; i < samples; ++i)
     {
         const auto value = running ? nextSample() : 0.0f;
